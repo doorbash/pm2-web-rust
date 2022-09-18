@@ -18,7 +18,8 @@ struct ScriptTemplate {
 
 struct Client {
     uuid: Uuid,
-    ch: Sender<String>,
+    stats_ch: Sender<String>,
+    logs_ch: Sender<String>
 }
 
 async fn js_handler(_: HttpRequest) -> Result<HttpResponse> {
@@ -40,13 +41,15 @@ async fn logs_handler(req: HttpRequest, stream: web::Payload) -> Result<HttpResp
     let client_ch_s = req.app_data::<Sender<Client>>().unwrap().clone();
     let removed_client_ch_s = req.app_data::<Sender<Uuid>>().unwrap().clone();
 
-    let (sender, receiver) = crossbeam_channel::bounded::<String>(1);
+    let (stats_ch_s, stats_ch_r) = crossbeam_channel::bounded::<String>(1);
+    let (logs_ch_s, logs_ch_r) = crossbeam_channel::bounded::<String>(10);
 
     let uuid = Uuid::new_v4();
 
     let client = Client {
         uuid: uuid,
-        ch: sender,
+        stats_ch: stats_ch_s,
+        logs_ch: logs_ch_s,
     };
 
     client_ch_s.send(client).unwrap();
@@ -54,11 +57,18 @@ async fn logs_handler(req: HttpRequest, stream: web::Payload) -> Result<HttpResp
     rt::spawn(async move {
         loop {
             select! {
-                recv(receiver) -> message => {
+                recv(stats_ch_r) -> message => {
                     if session.text(message.unwrap()).await.is_err() {
                         removed_client_ch_s.send(uuid).unwrap();
                         session.close(None).await;
-                        break;
+                        return
+                    }
+                }
+                recv(logs_ch_r) -> message => {
+                    if session.text(message.unwrap()).await.is_err() {
+                        removed_client_ch_s.send(uuid).unwrap();
+                        session.close(None).await;
+                        return;
                     }
                 }
                 default => {
@@ -75,20 +85,31 @@ async fn logs_handler(req: HttpRequest, stream: web::Payload) -> Result<HttpResp
 async fn main() -> std::io::Result<()> {
     // pretty_env_logger::init();
 
-    let (data_ch_s, data_ch_r) = crossbeam_channel::bounded::<String>(0);
-    let (clients_ch_s, clients_ch_r) = crossbeam_channel::bounded::<Client>(0);
-    let (removed_clients_ch_s, removed_clients_ch_r) = crossbeam_channel::bounded::<Uuid>(0);
+    let (stats_ch_s, stats_ch_r) = crossbeam_channel::bounded::<String>(1);
+    let (logs_ch_s, logs_ch_r) = crossbeam_channel::bounded::<String>(10);
+    let (clients_ch_s, clients_ch_r) = crossbeam_channel::bounded::<Client>(10);
+    let (removed_clients_ch_s, removed_clients_ch_r) = crossbeam_channel::bounded::<Uuid>(10);
 
-    pm2::PM2::start(data_ch_s, Duration::from_secs(3));
+    pm2::PM2::start(stats_ch_s, logs_ch_s, Duration::from_secs(3));
+
     thread::spawn(move || {
-        let clients: RefCell<HashMap<Uuid, Sender<String>>> = RefCell::new(HashMap::new());
+        let clients: RefCell<HashMap<Uuid, Client>> = RefCell::new(HashMap::new());
         loop {
             select! {
-                recv(data_ch_r) -> data => {
+                recv(stats_ch_r) -> data => {
                     let data = data.unwrap();
                     for client in clients.borrow().values() {
                         select! {
-                            send(client, data.clone()) -> _ => (),
+                            send(client.stats_ch, data.clone()) -> _ => (),
+                            default => ()
+                        }
+                    }
+                }
+                recv(logs_ch_r) -> data => {
+                    let data = data.unwrap();
+                    for client in clients.borrow().values() {
+                        select! {
+                            send(client.logs_ch, data.clone()) -> _ => (),
                             default => ()
                         }
                     }
@@ -101,12 +122,11 @@ async fn main() -> std::io::Result<()> {
                 recv(clients_ch_r) -> client => {
                     let client = client.unwrap();
                     println!("client connected: {}", client.uuid);
-                    clients.borrow_mut().insert(client.uuid, client.ch);
+                    clients.borrow_mut().insert(client.uuid, client);
                 }
             }
         }
     });
-    // handler.join().unwrap();
 
     HttpServer::new(move || {
         App::new()
@@ -114,12 +134,11 @@ async fn main() -> std::io::Result<()> {
             .app_data(clients_ch_s.clone())
             .app_data(removed_clients_ch_s.clone())
             .route("/script.js", web::get().to(js_handler))
-            // .route("/logs", web::get().to(logs_handler))
             .service(web::resource("/logs").route(web::get().to(logs_handler)))
             .service(Files::new("/", "./static/").index_file("index.html"))
     })
     .bind(("0.0.0.0", 6060))?
-    .workers(10)
+    .workers(4)
     .run()
     .await
 }
