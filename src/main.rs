@@ -4,7 +4,7 @@ use actix_files::Files;
 use actix_web::{App, Error, HttpRequest, HttpResponse, HttpServer, Result, web, rt};
 use askama::Template;
 use crossbeam_channel::{select, Sender};
-use std::{cell::RefCell, collections::HashMap, thread, time::{Duration}};
+use std::{collections::HashMap, thread, time::{Duration}};
 use uuid::Uuid;
 
 #[derive(Template)]
@@ -93,12 +93,12 @@ async fn main() -> std::io::Result<()> {
     pm2::PM2::start(stats_ch_s, logs_ch_s, Duration::from_secs(3));
 
     thread::spawn(move || {
-        let clients: RefCell<HashMap<Uuid, Client>> = RefCell::new(HashMap::new());
+        let mut clients: HashMap<Uuid, Client> = HashMap::new();
         loop {
             select! {
                 recv(stats_ch_r) -> data => {
                     let data = data.unwrap();
-                    for client in clients.borrow().values() {
+                    for client in clients.values() {
                         select! {
                             send(client.stats_ch, data.clone()) -> _ => (),
                             default => ()
@@ -107,7 +107,7 @@ async fn main() -> std::io::Result<()> {
                 }
                 recv(logs_ch_r) -> data => {
                     let data = data.unwrap();
-                    for client in clients.borrow().values() {
+                    for client in clients.values() {
                         select! {
                             send(client.logs_ch, data.clone()) -> _ => (),
                             default => ()
@@ -117,12 +117,12 @@ async fn main() -> std::io::Result<()> {
                 recv(removed_clients_ch_r) -> uuid => {
                     let uuid = uuid.unwrap();
                     println!("client disconnected: {}", uuid);
-                    clients.borrow_mut().remove(&uuid);
+                    clients.remove(&uuid);
                 }
                 recv(clients_ch_r) -> client => {
                     let client = client.unwrap();
                     println!("client connected: {}", client.uuid);
-                    clients.borrow_mut().insert(client.uuid, client);
+                    clients.insert(client.uuid, client);
                 }
             }
         }
