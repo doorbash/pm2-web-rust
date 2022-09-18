@@ -1,21 +1,11 @@
 mod pm2;
 
 use actix_files::Files;
-use actix_web::{App, Error, HttpRequest, HttpResponse, HttpServer, Result, middleware::Logger, web, rt};
+use actix_web::{App, Error, HttpRequest, HttpResponse, HttpServer, Result, web, rt};
 use askama::Template;
 use crossbeam_channel::{select, Sender};
-use std::{cell::RefCell, collections::HashMap, thread, time::{Duration, Instant}};
+use std::{cell::RefCell, collections::HashMap, thread, time::{Duration}};
 use uuid::Uuid;
-use futures_util::{StreamExt, future::{self, Either}};
-use tokio::{pin, time::interval};
-use actix_ws::Message;
-
-/// Should be half (or less) of the acceptable client timeout.
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
-
-/// How long before lack of client response causes a timeout.
-const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
-
 
 #[derive(Template)]
 #[template(path = "script.js", escape = "none")]
@@ -45,12 +35,12 @@ async fn js_handler(_: HttpRequest) -> Result<HttpResponse> {
 }
 
 async fn logs_handler(req: HttpRequest, stream: web::Payload) -> Result<HttpResponse, Error> {
-    let (res, mut session, mut msg_stream) = actix_ws::handle(&req, stream)?;
+    let (res, mut session, _) = actix_ws::handle(&req, stream)?;
 
     let client_ch_s = req.app_data::<Sender<Client>>().unwrap().clone();
     let removed_client_ch_s = req.app_data::<Sender<Uuid>>().unwrap().clone();
 
-    let (sender, receiver) = crossbeam_channel::bounded::<String>(0);
+    let (sender, receiver) = crossbeam_channel::bounded::<String>(1);
 
     let uuid = Uuid::new_v4();
 
@@ -61,101 +51,21 @@ async fn logs_handler(req: HttpRequest, stream: web::Payload) -> Result<HttpResp
 
     client_ch_s.send(client).unwrap();
 
-    let mut s = session.clone();
-
     rt::spawn(async move {
-        log::info!("connected");
-    
-        let mut last_heartbeat = Instant::now();
-        let mut interval = interval(HEARTBEAT_INTERVAL);
-    
-        let reason = loop {
-            // create "next client timeout check" future
-            let tick = interval.tick();
-            // required for select()
-            pin!(tick);
-    
-            // waits for either `msg_stream` to receive a message from the client or the heartbeat
-            // interval timer to tick, yielding the value of whichever one is ready first
-            match future::select(msg_stream.next(), tick).await {
-                // received message from WebSocket client
-                Either::Left((Some(Ok(msg)), _)) => {
-                    log::debug!("msg: {msg:?}");
-    
-                    match msg {
-                        Message::Text(text) => {
-                            session.text(text).await.unwrap();
-                        }
-    
-                        Message::Binary(bin) => {
-                            session.binary(bin).await.unwrap();
-                        }
-    
-                        Message::Close(reason) => {
-                            break reason;
-                        }
-    
-                        Message::Ping(bytes) => {
-                            // log::info!("ping!");
-                            last_heartbeat = Instant::now();
-                            let _ = session.pong(&bytes).await;
-                        }
-    
-                        Message::Pong(_) => {
-                            // log::info!("pong!");
-                            last_heartbeat = Instant::now();
-                        }
-    
-                        Message::Continuation(_) => {
-                            log::warn!("no support for continuation frames");
-                        }
-    
-                        // no-op; ignore
-                        Message::Nop => {}
-                    };
-                }
-    
-                // client WebSocket stream error
-                Either::Left((Some(Err(err)), _)) => {
-                    log::error!("{}", err);
-                    break None;
-                }
-    
-                // client WebSocket stream ended
-                Either::Left((None, _)) => break None,
-    
-                // heartbeat interval ticked
-                Either::Right((_inst, _)) => {
-                    // if no heartbeat ping/pong received recently, close the connection
-                    if Instant::now().duration_since(last_heartbeat) > CLIENT_TIMEOUT {
-                        log::info!(
-                            "client has not sent heartbeat in over {CLIENT_TIMEOUT:?}; disconnecting"
-                        );
-    
-                        break None;
+        loop {
+            select! {
+                recv(receiver) -> message => {
+                    if session.text(message.unwrap()).await.is_err() {
+                        removed_client_ch_s.send(uuid).unwrap();
+                        session.close(None).await;
+                        break;
                     }
-
-                    select! {
-                        recv(receiver) -> data => {
-                            let data = data.unwrap();
-                            // println!("new data: {}", data);
-                            s.text(data).await;
-                        }
-                        recv(crossbeam_channel::after(Duration::from_secs(3))) -> _ => {}
-                    }
-    
-                    // send heartbeat ping
-                    let _ = session.ping(b"").await;
+                }
+                default => {
+                    tokio::task::yield_now().await;
                 }
             }
-        };
-
-        removed_client_ch_s.send(uuid).unwrap();
-    
-        // attempt to close connection gracefully
-        let _ = session.close(reason).await;
-    
-        log::info!("disconnected");
+        }
     });
 
     Ok(res)
