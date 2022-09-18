@@ -115,8 +115,8 @@ impl PM2 {
         };
         select! {
             send(sc, serde_json::to_string(&data).unwrap()) -> _ => {}
-            // recv(after(time::Duration::from_secs(3))) -> _ => {}
-            default => {}
+            recv(after(time::Duration::from_secs(3))) -> _ => {}
+            // default => {}
         }
     }
 }
