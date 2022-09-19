@@ -1,12 +1,7 @@
 use core::time;
 use serde::Serialize;
 use serde_json::Value;
-use std::{
-    io::{BufRead, BufReader},
-    process::{Command, Output, Stdio},
-    str,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{io::{BufRead, BufReader}, process::{Command, Stdio}, str, time::{Duration, SystemTime, UNIX_EPOCH}};
 use tokio::{pin, sync::mpsc::Sender, task::JoinHandle, time::sleep};
 
 pub struct PM2 {}
@@ -31,14 +26,17 @@ struct LogsData {
     message: String,
     time: String,
     #[serde(rename = "type")]
-    Type: String,
+    _type: String,
 }
 
 #[derive(Serialize)]
 struct Message<T> {
-    Type: String,
-    Data: T,
-    Time: u128,
+    #[serde(rename = "Type")]
+    _type: String,
+    #[serde(rename = "Data")]
+    data: T,
+    #[serde(rename = "Time")]
+    time: u128,
 }
 
 impl PM2 {
@@ -47,18 +45,29 @@ impl PM2 {
         logs_chan: Sender<String>,
         interval: time::Duration,
     ) -> (JoinHandle<()>, JoinHandle<()>) {
+
+        macro_rules! unwrap_or_sleep {
+            ($res:expr) => {
+                match $res {
+                    Ok(val) => val,
+                    Err(_) => {
+                        tokio::time::sleep(interval).await;
+                        continue;
+                    }
+                }
+            };
+        }
+
         return (
             tokio::task::spawn(async move {
                 loop {
                     let mut list: Vec<Stats> = vec![];
-                    let output: Output = Command::new("pm2")
-                        .arg("jlist")
-                        .output()
-                        .expect("failed to execute process");
 
-                    if let Value::Array(arr) =
-                        serde_json::from_str(str::from_utf8(&output.stdout).unwrap()).unwrap()
-                    {
+                    let output = unwrap_or_sleep!(Command::new("pm2").arg("jlist").output());
+
+                    let s = unwrap_or_sleep!(str::from_utf8(&output.stdout));
+
+                    if let Value::Array(arr) = unwrap_or_sleep!(serde_json::from_str(s)) {
                         for obj in arr {
                             let mut stats = Stats {
                                 name: String::from(""),
@@ -75,20 +84,28 @@ impl PM2 {
                                 stats.name = name
                             }
                             if let Value::Number(id) = obj["pm_id"].clone() {
-                                stats.id = id.as_i64().unwrap();
+                                if let Some(x) = id.as_i64() {
+                                    stats.id = x;
+                                }
                             }
                             if let Value::Number(pid) = obj["pid"].clone() {
-                                stats.pid = pid.as_i64().unwrap();
+                                if let Some(x) = pid.as_i64() {
+                                    stats.pid = x;
+                                }
                             }
                             if let Value::Object(pm2_env) = &obj["pm2_env"] {
                                 if let Value::Number(uptime) = pm2_env["pm_uptime"].clone() {
-                                    stats.uptime = uptime.as_i64().unwrap()
+                                    if let Some(x) = uptime.as_i64() {
+                                        stats.uptime = x;
+                                    }
                                 }
                                 if let Value::String(status) = pm2_env["status"].clone() {
                                     stats.status = status;
                                 }
                                 if let Value::Number(restart) = pm2_env["restart_time"].clone() {
-                                    stats.restart = restart.as_i64().unwrap();
+                                    if let Some(x) = restart.as_i64() {
+                                        stats.restart = x;
+                                    }
                                 }
                                 if let Value::String(user) = pm2_env["username"].clone() {
                                     stats.user = user;
@@ -96,27 +113,29 @@ impl PM2 {
                             }
                             if let Value::Object(monit) = &obj["monit"] {
                                 if let Value::Number(cpu) = monit["cpu"].clone() {
-                                    stats.cpu = cpu.as_f64().unwrap();
+                                    if let Some(x) = cpu.as_f64() {
+                                        stats.cpu = x;
+                                    }
                                 }
                                 if let Value::Number(mem) = monit["memory"].clone() {
-                                    stats.mem = mem.as_i64().unwrap();
+                                    if let Some(x) = mem.as_i64() {
+                                        stats.mem = x;
+                                    }
                                 }
                             }
                             list.push(stats);
                         }
                     }
                     let data = Message {
-                        Type: String::from("stats"),
-                        Data: list,
-                        Time: SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis(),
+                        _type: String::from("stats"),
+                        data: list,
+                        time: unwrap_or_sleep!(SystemTime::now().duration_since(UNIX_EPOCH)).as_millis(),
                     };
+
                     let sleep = sleep(Duration::from_secs(1));
                     pin!(sleep);
                     tokio::select! {
-                        _ = stats_chan.send(serde_json::to_string(&data).unwrap()) => {},
+                        _ = stats_chan.send(unwrap_or_sleep!(serde_json::to_string(&data))) => {},
                         _ = &mut sleep => {
                             break;
                         }
@@ -124,48 +143,92 @@ impl PM2 {
                     tokio::time::sleep(interval).await;
                 }
             }),
-            tokio::task::spawn_blocking(move || {
-                let child = Command::new("pm2")
+            tokio::task::spawn_blocking(move || loop {
+                if let Ok(child) = Command::new("pm2")
                     .arg("logs")
                     .arg("--format")
                     .arg("--timestamp")
-                    .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
                     .spawn()
-                    .unwrap();
-                let mut br = BufReader::new(child.stdout.unwrap());
-                loop {
-                    let mut line = String::new();
-                    br.read_line(&mut line).unwrap();
+                {
+                    if let Some(stdout) = child.stdout {
+                        let mut br = BufReader::new(stdout);
+                        loop {
+                            let mut line = String::new();
 
-                    if None == line.find("timestamp=") {
-                        continue;
+                            if let Err(err) = br.read_line(&mut line) {
+                                println!("error while reading br line {}", err);
+                                break;
+                            }
+
+                            if None == line.find("timestamp=") {
+                                break;
+                            }
+
+                            let idx1 = match line.find(' ') {
+                                Some(x) => x,
+                                None => break,
+                            };
+
+                            if !line[idx1+1..].starts_with("app=") {
+                                break;
+                            }
+
+                            let idx2 =
+                                idx1 + match line[idx1 + 1..].find(' ') {
+                                    Some(x) => x,
+                                    None => break,
+                                } + 1;
+
+                            if !line[idx2+1..].starts_with("id=") {
+                                break;
+                            }
+
+                            let idx3 =
+                                idx2 + match line[idx2 + 1..].find(' ') {
+                                    Some(x) => x,
+                                    None => break,
+                                } + 1;
+
+                            if !line[idx3+1..].starts_with("type=") {
+                                break;
+                            }
+
+                            let idx4 =
+                                idx3 + match line[idx3 + 1..].find(' ') {
+                                    Some(x) => x,
+                                    None => break,
+                                } + 1;
+
+                            if !line[idx4+1..].starts_with("message=") {
+                                break;
+                            }
+
+                            let data = Message {
+                                _type: String::from("log"),
+                                data: LogsData {
+                                    app: line[idx1 + 5..idx2].to_string(),
+                                    id: line[idx2 + 4..idx3].to_string(),
+                                    message: line[idx4 + 9..].to_string(),
+                                    time: format!("{} {}", &line[10..20], &line[21..idx1]),
+                                    _type: line[idx3 + 6..idx4].to_string(),
+                                },
+                                time: match SystemTime::now().duration_since(UNIX_EPOCH) {
+                                    Ok(x) => x,
+                                    Err(_) => break
+                                }.as_millis(),
+                            };
+                            let lg_ch = logs_chan.clone();
+                            tokio::task::spawn(async move {
+                                if let Ok(x) = serde_json::to_string(&data) {
+                                    lg_ch.send(x).await;
+                                }
+                            });
+                        }
                     }
-
-                    let idx1 = line.find(' ').unwrap();
-                    let idx2 = idx1 + line[idx1 + 1..].find(' ').unwrap() + 1;
-                    let idx3 = idx2 + line[idx2 + 1..].find(' ').unwrap() + 1;
-                    let idx4 = idx3 + line[idx3 + 1..].find(' ').unwrap() + 1;
-
-                    let data = Message {
-                        Type: String::from("log"),
-                        Data: LogsData {
-                            app: line[idx1 + 5..idx2].to_string(),
-                            id: line[idx2 + 4..idx3].to_string(),
-                            message: line[idx4 + 9..].to_string(),
-                            time: format!("{} {}", &line[10..20], &line[21..idx1]),
-                            Type: line[idx3 + 6..idx4].to_string(),
-                        },
-                        Time: SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis(),
-                    };
-                    let lg_ch = logs_chan.clone();
-                    let x = tokio::task::spawn(async move {
-                        lg_ch.send(serde_json::to_string(&data).unwrap()).await;
-                    });
                 }
+                std::thread::sleep(interval);
             }),
         );
     }
