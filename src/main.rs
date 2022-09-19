@@ -1,11 +1,15 @@
 mod pm2;
 
 use actix_files::Files;
-use actix_web::{App, Error, HttpRequest, HttpResponse, HttpServer, Result, web, rt};
+use actix_web::{rt, web, App, Error, HttpRequest, HttpResponse, HttpServer, Result};
 use askama::Template;
-use std::{collections::HashMap, process, time::{Duration}};
+use std::{
+    collections::{HashMap, VecDeque},
+    process,
+    time::Duration,
+};
+use tokio::sync::mpsc::{channel, Sender};
 use uuid::Uuid;
-use tokio::sync::mpsc::{Sender, channel};
 
 #[derive(Template)]
 #[template(path = "script.js", escape = "none")]
@@ -19,13 +23,13 @@ struct ScriptTemplate {
 struct Client {
     uuid: Uuid,
     stats_ch: Sender<String>,
-    logs_ch: Sender<String>
+    logs_ch: Sender<String>,
 }
 
 async fn js_handler(_: HttpRequest) -> Result<HttpResponse> {
     Ok(HttpResponse::Ok().content_type("text/javascript").body(
         ScriptTemplate {
-            actions_enabled: true,
+            actions_enabled: false,
             time_enabled: true,
             app_id_enabled: false,
             app_name_enabled: true,
@@ -95,36 +99,60 @@ async fn main() -> Result<(), std::io::Error> {
 
     tokio::task::spawn(async move {
         let mut clients: HashMap<Uuid, Client> = HashMap::new();
+        let mut stats = String::new();
+        let mut logs: VecDeque<String> = VecDeque::with_capacity(10);
         loop {
             tokio::select! {
                 data = stats_ch_r.recv() => {
-                    let data = data.unwrap();
+                    stats = data.unwrap();
                     for client in clients.values() {
                         tokio::select! {
-                            _ = client.stats_ch.send(data.clone()) => {},
+                            _ = client.stats_ch.send(stats.clone()) => {},
                             else => ()
                         }
                     }
                 },
-               data = logs_ch_r.recv() => {
+                data = logs_ch_r.recv() => {
+                    while logs.len() >= 200 {
+                        logs.pop_front();
+                    }
                     let data = data.unwrap();
+                    let data_clone = data.clone();
+                    logs.push_back(data);
                     for client in clients.values() {
                         tokio::select! {
-                            _ = client.logs_ch.send(data.clone()) => (),
+                            _ = client.logs_ch.send(data_clone.clone()) => (),
                             else => ()
                         }
                     }
-                },
+                }
+                client = clients_ch_r.recv() => {
+                    let client = client.unwrap();
+                    println!("client connected: {}", client.uuid);
+                    
+                    if !stats.is_empty() {
+                        tokio::select! {
+                            _ = client.stats_ch.send(stats.clone()) => (),
+                            else => ()
+                        }
+                    }
+
+                    for log in logs.iter().cloned() {
+                        tokio::select! {
+                            _ = client.logs_ch.send(log) => (),
+                            else => ()
+                        }
+                    }
+
+                    clients.insert(client.uuid, client);
+                    println!("num connected clients: {}", clients.len());
+                }
                 uuid = removed_clients_ch_r.recv() => {
                     let uuid = uuid.unwrap();
                     println!("client disconnected: {}", uuid);
                     clients.remove(&uuid);
+                    println!("num connected clients: {}", clients.len());
                 },
-                client = clients_ch_r.recv() => {
-                    let client = client.unwrap();
-                    println!("client connected: {}", client.uuid);
-                    clients.insert(client.uuid, client);
-                }
             }
         }
     });
@@ -139,6 +167,7 @@ async fn main() -> Result<(), std::io::Error> {
             .service(Files::new("/", "./static/").index_file("index.html"))
     })
     .bind(("0.0.0.0", 6060))?
-    .workers(10)
-    .run().await
+    .workers(2)
+    .run()
+    .await
 }

@@ -12,7 +12,7 @@ use tokio::{pin, sync::mpsc::Sender, task::JoinHandle, time::sleep};
 pub struct PM2 {}
 
 #[derive(Debug, Serialize)]
-pub struct Stats {
+struct Stats {
     name: String,
     id: i64,
     pid: i64,
@@ -118,7 +118,6 @@ impl PM2 {
                     tokio::select! {
                         _ = stats_chan.send(serde_json::to_string(&data).unwrap()) => {},
                         _ = &mut sleep => {
-                            println!("sleep timeout!");
                             break;
                         }
                     }
