@@ -131,14 +131,12 @@ impl PM2 {
                         data: list,
                         time: unwrap_or_sleep!(SystemTime::now().duration_since(UNIX_EPOCH)).as_millis(),
                     };
-
+                    let j = unwrap_or_sleep!(serde_json::to_string(&data));
                     let sleep = sleep(Duration::from_secs(1));
                     pin!(sleep);
                     tokio::select! {
-                        _ = stats_chan.send(unwrap_or_sleep!(serde_json::to_string(&data))) => {},
-                        _ = &mut sleep => {
-                            break;
-                        }
+                        _ = stats_chan.send(j) => (),
+                        _ = &mut sleep => ()
                     }
                     tokio::time::sleep(interval).await;
                 }
