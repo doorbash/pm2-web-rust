@@ -77,7 +77,7 @@ async fn logs_handler(req: HttpRequest, stream: web::Payload) -> Result<HttpResp
                         if session.text(x).await.is_err() {
                             removed_clients_ch_s.send(uuid).await;
                             session.close(None).await;
-                            return
+                            break;
                         }
                     }
                 },
@@ -86,7 +86,7 @@ async fn logs_handler(req: HttpRequest, stream: web::Payload) -> Result<HttpResp
                         if session.text(x).await.is_err() {
                             removed_clients_ch_s.send(uuid).await;
                             session.close(None).await;
-                            return;
+                            break;
                         }
                     }
                 }
@@ -113,77 +113,72 @@ async fn main() -> Result<(), std::io::Error> {
 
     let (j1, j2) = pm2::PM2::start(stats_ch_s, logs_ch_s, Duration::from_secs(3));
 
-    tokio::task::spawn(async move { if j1.await.is_err() { process::exit(1); } });
-    tokio::task::spawn(async move { if j2.await.is_err() { process::exit(1); } });
-
-    tokio::task::spawn(async move {
-        if tokio::task::spawn(async move {
-            let mut clients: HashMap<Uuid, Client> = HashMap::new();
-            let mut stats = String::new();
-            let mut logs: VecDeque<String> = VecDeque::with_capacity(10);
-            loop {
-                tokio::select! {
-                    data = stats_ch_r.recv() => {
-                        if let Some(x) = data {
-                            stats = x;
-                            for client in clients.values() {
-                                tokio::select! {
-                                    _ = client.stats_ch.send(stats.clone()) => {},
-                                    else => ()
-                                }
-                            }
-                        }
-                    },
-                    data = logs_ch_r.recv() => {
-                        while logs.len() >= 200 {
-                            logs.pop_front();
-                        }
-                        if let Some(data) = data {
-                            let data_clone = data.clone();
-                            logs.push_back(data);
-                            for client in clients.values() {
-                                tokio::select! {
-                                    _ = client.logs_ch.send(data_clone.clone()) => (),
-                                    else => ()
-                                }
+    let j3 = tokio::task::spawn(async move {
+        let mut clients: HashMap<Uuid, Client> = HashMap::new();
+        let mut stats = String::new();
+        let mut logs: VecDeque<String> = VecDeque::with_capacity(10);
+        loop {
+            tokio::select! {
+                data = stats_ch_r.recv() => {
+                    if let Some(x) = data {
+                        stats = x;
+                        for client in clients.values() {
+                            tokio::select! {
+                                _ = client.stats_ch.send(stats.clone()) => {},
+                                else => ()
                             }
                         }
                     }
-                    client = clients_ch_r.recv() => {
-                        if let Some(client) = client {
-                            println!("client connected: {}", client.uuid);
-    
-                            if !stats.is_empty() {
-                                tokio::select! {
-                                    _ = client.stats_ch.send(stats.clone()) => (),
-                                    else => ()
-                                }
+                },
+                data = logs_ch_r.recv() => {
+                    while logs.len() >= 200 {
+                        logs.pop_front();
+                    }
+                    if let Some(data) = data {
+                        let data_clone = data.clone();
+                        logs.push_back(data);
+                        for client in clients.values() {
+                            tokio::select! {
+                                _ = client.logs_ch.send(data_clone.clone()) => (),
+                                else => ()
                             }
-    
-                            for log in logs.iter().cloned() {
-                                tokio::select! {
-                                    _ = client.logs_ch.send(log) => (),
-                                    else => ()
-                                }
-                            }
-    
-                            clients.insert(client.uuid, client);
-                            println!("num connected clients: {}", clients.len());
                         }
                     }
-                    uuid = removed_clients_ch_r.recv() => {
-                        if let Some(uuid) = uuid {
-                            println!("client disconnected: {}", uuid);
-                            clients.remove(&uuid);
-                            println!("num connected clients: {}", clients.len());
-                        }
-                    },
                 }
+                client = clients_ch_r.recv() => {
+                    if let Some(client) = client {
+                        println!("client connected: {}", client.uuid);
+
+                        if !stats.is_empty() {
+                            tokio::select! {
+                                _ = client.stats_ch.send(stats.clone()) => (),
+                                else => ()
+                            }
+                        }
+
+                        for log in logs.iter().cloned() {
+                            tokio::select! {
+                                _ = client.logs_ch.send(log) => (),
+                                else => ()
+                            }
+                        }
+
+                        clients.insert(client.uuid, client);
+                        println!("num connected clients: {}", clients.len());
+                    }
+                }
+                uuid = removed_clients_ch_r.recv() => {
+                    if let Some(uuid) = uuid {
+                        println!("client disconnected: {}", uuid);
+                        clients.remove(&uuid);
+                        println!("num connected clients: {}", clients.len());
+                    }
+                },
             }
-        }).await.is_err() { process::exit(0); }
+        }
     });
 
-    HttpServer::new(move || {
+    let result = HttpServer::new(move || {
         App::new()
             // .wrap(Logger::default())
             .app_data(clients_ch_s.clone())
@@ -191,9 +186,19 @@ async fn main() -> Result<(), std::io::Error> {
             .route("/script.js", web::get().to(js_handler))
             .service(web::resource("/logs").route(web::get().to(logs_handler)))
             .service(Files::new("/", "./static/").index_file("index.html"))
-    })
-    .bind(("0.0.0.0", 6060))?
-    .workers(2)
-    .run()
-    .await
+    }).workers(2).bind(("0.0.0.0", 6060));
+
+    let j4 = tokio::task::spawn(match result {
+        Ok(x) => x,
+        Err(err) => {
+            println!("{}", err);
+            process::exit(1);
+        }
+    }.run());
+
+    if tokio::try_join!(j1, j2, j3, j4).is_err() {
+        process::exit(1);
+    }
+
+    Ok(())
 }

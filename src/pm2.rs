@@ -143,7 +143,7 @@ impl PM2 {
                     tokio::time::sleep(interval).await;
                 }
             }),
-            tokio::task::spawn_blocking(move || loop {
+            tokio::task::spawn_blocking(move || {
                 if let Ok(child) = Command::new("pm2")
                     .arg("logs")
                     .arg("--format")
@@ -228,7 +228,7 @@ impl PM2 {
                         }
                     }
                 }
-                std::thread::sleep(interval);
+                panic!("error while reading logs")
             }),
         );
     }
