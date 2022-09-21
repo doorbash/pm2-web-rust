@@ -11,7 +11,7 @@ use std::{
     process,
     time::Duration,
 };
-use tokio::sync::mpsc::{channel, Sender};
+use tokio::sync::mpsc::{Sender, channel, unbounded_channel};
 use uuid::Uuid;
 
 #[derive(Template)]
@@ -107,7 +107,7 @@ async fn main() -> Result<(), std::io::Error> {
     .expect("Error setting Ctrl-C handler");
 
     let (stats_ch_s, mut stats_ch_r) = channel::<String>(1);
-    let (logs_ch_s, mut logs_ch_r) = channel::<String>(200);
+    let (logs_ch_s, mut logs_ch_r) = unbounded_channel::<String>();
     let (clients_ch_s, mut clients_ch_r) = channel::<Client>(100);
     let (removed_clients_ch_s, mut removed_clients_ch_r) = channel::<Uuid>(100);
 
@@ -137,6 +137,7 @@ async fn main() -> Result<(), std::io::Error> {
                     if let Some(data) = data {
                         let data_clone = data.clone();
                         logs.push_back(data);
+                        println!("logs len = {}", logs.len());
                         for client in clients.values() {
                             tokio::select! {
                                 _ = client.logs_ch.send(data_clone.clone()) => (),
@@ -186,7 +187,7 @@ async fn main() -> Result<(), std::io::Error> {
             .route("/script.js", web::get().to(js_handler))
             .service(web::resource("/logs").route(web::get().to(logs_handler)))
             .service(Files::new("/", "./static/").index_file("index.html"))
-    }).workers(2).bind(("0.0.0.0", 6060));
+    }).workers(4).bind(("0.0.0.0", 6060));
 
     let j4 = tokio::task::spawn(match result {
         Ok(x) => x,

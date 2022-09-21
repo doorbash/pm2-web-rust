@@ -2,7 +2,7 @@ use core::time;
 use serde::Serialize;
 use serde_json::Value;
 use std::{io::{BufRead, BufReader}, process::{Command, Stdio}, str, time::{Duration, SystemTime, UNIX_EPOCH}};
-use tokio::{pin, sync::mpsc::Sender, task::JoinHandle, time::sleep};
+use tokio::{pin, sync::mpsc::{Sender, UnboundedSender}, task::JoinHandle, time::sleep};
 
 pub struct PM2 {}
 
@@ -42,7 +42,7 @@ struct Message<T> {
 impl PM2 {
     pub fn start(
         stats_chan: Sender<String>,
-        logs_chan: Sender<String>,
+        logs_chan: UnboundedSender<String>,
         interval: time::Duration,
     ) -> (JoinHandle<()>, JoinHandle<()>) {
 
@@ -141,7 +141,7 @@ impl PM2 {
                     tokio::time::sleep(interval).await;
                 }
             }),
-            tokio::task::spawn_blocking(move || {
+            tokio::task::spawn_blocking(move || loop {
                 if let Ok(child) = Command::new("pm2")
                     .arg("logs")
                     .arg("--format")
@@ -217,16 +217,12 @@ impl PM2 {
                                     Err(_) => break
                                 }.as_millis(),
                             };
-                            let lg_ch = logs_chan.clone();
-                            tokio::task::spawn(async move {
-                                if let Ok(x) = serde_json::to_string(&data) {
-                                    lg_ch.send(x).await;
-                                }
-                            });
+                            if let Ok(x) = serde_json::to_string(&data) {
+                                logs_chan.send(x);
+                            }
                         }
                     }
                 }
-                panic!("error while reading logs")
             }),
         );
     }
