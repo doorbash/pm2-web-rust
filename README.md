@@ -3,12 +3,11 @@ A simple web based monitor for PM2
 
 ## Usage
 ```
-A simple web based monitor for PM2
+pm2-web-rust [OPTIONS]
+```
 
-USAGE:
-    pm2-web-rust [OPTIONS]
-
-OPTIONS:
+**Options:**
+```
     -h, --help
             Print help information
 
