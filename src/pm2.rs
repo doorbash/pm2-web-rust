@@ -152,9 +152,8 @@ impl PM2 {
                 {
                     if let Some(stdout) = child.stdout {
                         let mut br = BufReader::new(stdout);
+                        let mut line = String::new();
                         loop {
-                            let mut line = String::new();
-
                             if let Err(err) = br.read_line(&mut line) {
                                 println!("error while reading br line {}", err);
                                 break;
@@ -220,6 +219,7 @@ impl PM2 {
                             if let Ok(x) = serde_json::to_string(&data) {
                                 logs_chan.send(x);
                             }
+                            line.clear();
                         }
                     }
                 }

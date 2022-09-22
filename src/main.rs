@@ -13,6 +13,20 @@ use std::{
 };
 use tokio::sync::mpsc::{Sender, channel, unbounded_channel};
 use uuid::Uuid;
+use clap::Parser;
+
+/// A simple web based monitor for PM2
+#[derive(Parser)]
+#[clap(author, version, about, long_about = None)]
+struct Cli {
+    /// Log buffer size
+    #[clap(short, long, value_parser, default_value_t = 200)]
+    log_buffer_size: usize,
+
+    /// PM2 process-list update interval in seconds
+    #[clap(short, long, value_parser, default_value_t = 10)]
+    interval: u64,
+}
 
 #[derive(Template)]
 #[template(path = "script.js", escape = "none")]
@@ -101,6 +115,8 @@ async fn logs_handler(req: HttpRequest, stream: web::Payload) -> Result<HttpResp
 async fn main() -> Result<(), std::io::Error> {
     // pretty_env_logger::init();
 
+    let args = Cli::parse();
+
     ctrlc::set_handler(move || {
         process::exit(0);
     })
@@ -111,12 +127,12 @@ async fn main() -> Result<(), std::io::Error> {
     let (clients_ch_s, mut clients_ch_r) = channel::<Client>(100);
     let (removed_clients_ch_s, mut removed_clients_ch_r) = channel::<Uuid>(100);
 
-    let (j1, j2) = pm2::PM2::start(stats_ch_s, logs_ch_s, Duration::from_secs(3));
+    let (j1, j2) = pm2::PM2::start(stats_ch_s, logs_ch_s, Duration::from_secs(args.interval));
 
     let j3 = tokio::task::spawn(async move {
         let mut clients: HashMap<Uuid, Client> = HashMap::new();
         let mut stats = String::new();
-        let mut logs: VecDeque<String> = VecDeque::with_capacity(10);
+        let mut logs: VecDeque<String> = VecDeque::with_capacity(args.log_buffer_size);
         loop {
             tokio::select! {
                 data = stats_ch_r.recv() => {
@@ -131,13 +147,12 @@ async fn main() -> Result<(), std::io::Error> {
                     }
                 },
                 data = logs_ch_r.recv() => {
-                    while logs.len() >= 200 {
+                    while logs.len() >= args.log_buffer_size {
                         logs.pop_front();
                     }
                     if let Some(data) = data {
                         let data_clone = data.clone();
                         logs.push_back(data);
-                        println!("logs len = {}", logs.len());
                         for client in clients.values() {
                             tokio::select! {
                                 _ = client.logs_ch.send(data_clone.clone()) => (),
