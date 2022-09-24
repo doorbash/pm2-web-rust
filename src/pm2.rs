@@ -1,8 +1,19 @@
 use core::time;
 use serde::Serialize;
 use serde_json::Value;
-use std::{io::{BufRead, BufReader}, process::{Command, Stdio}, str, time::{Duration, SystemTime, UNIX_EPOCH}};
-use tokio::{pin, sync::mpsc::{Sender, UnboundedSender}, task::JoinHandle, time::sleep};
+use std::{
+    process::Stdio,
+    str,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use tokio::{
+    io::{AsyncBufReadExt, BufReader},
+    pin,
+    process::Command,
+    sync::mpsc::{Sender, UnboundedSender},
+    task::JoinHandle,
+    time::sleep,
+};
 
 pub struct PM2 {}
 
@@ -45,7 +56,6 @@ impl PM2 {
         logs_chan: UnboundedSender<String>,
         interval: time::Duration,
     ) -> (JoinHandle<()>, JoinHandle<()>) {
-
         macro_rules! unwrap_or_sleep {
             ($res:expr) => {
                 match $res {
@@ -63,7 +73,7 @@ impl PM2 {
                 loop {
                     let mut list: Vec<Stats> = vec![];
 
-                    let output = unwrap_or_sleep!(Command::new("pm2").arg("jlist").output());
+                    let output = unwrap_or_sleep!(Command::new("pm2").arg("jlist").output().await);
 
                     let s = unwrap_or_sleep!(str::from_utf8(&output.stdout));
 
@@ -129,7 +139,8 @@ impl PM2 {
                     let data = Message {
                         _type: String::from("stats"),
                         data: list,
-                        time: unwrap_or_sleep!(SystemTime::now().duration_since(UNIX_EPOCH)).as_millis(),
+                        time: unwrap_or_sleep!(SystemTime::now().duration_since(UNIX_EPOCH))
+                            .as_millis(),
                     };
                     let j = unwrap_or_sleep!(serde_json::to_string(&data));
                     let sleep = sleep(Duration::from_secs(1));
@@ -141,7 +152,7 @@ impl PM2 {
                     tokio::time::sleep(interval).await;
                 }
             }),
-            tokio::task::spawn_blocking(move || loop {
+            tokio::task::spawn(async move {
                 if let Ok(child) = Command::new("pm2")
                     .arg("logs")
                     .arg("--format")
@@ -154,7 +165,7 @@ impl PM2 {
                         let mut br = BufReader::new(stdout);
                         let mut line = String::new();
                         loop {
-                            if let Err(err) = br.read_line(&mut line) {
+                            if let Err(err) = br.read_line(&mut line).await {
                                 println!("error while reading br line {}", err);
                                 break;
                             }
@@ -168,7 +179,7 @@ impl PM2 {
                                 None => break,
                             };
 
-                            if !line[idx1+1..].starts_with("app=") {
+                            if !line[idx1 + 1..].starts_with("app=") {
                                 break;
                             }
 
@@ -178,7 +189,7 @@ impl PM2 {
                                     None => break,
                                 } + 1;
 
-                            if !line[idx2+1..].starts_with("id=") {
+                            if !line[idx2 + 1..].starts_with("id=") {
                                 break;
                             }
 
@@ -188,7 +199,7 @@ impl PM2 {
                                     None => break,
                                 } + 1;
 
-                            if !line[idx3+1..].starts_with("type=") {
+                            if !line[idx3 + 1..].starts_with("type=") {
                                 break;
                             }
 
@@ -198,7 +209,7 @@ impl PM2 {
                                     None => break,
                                 } + 1;
 
-                            if !line[idx4+1..].starts_with("message=") {
+                            if !line[idx4 + 1..].starts_with("message=") {
                                 break;
                             }
 
@@ -213,8 +224,9 @@ impl PM2 {
                                 },
                                 time: match SystemTime::now().duration_since(UNIX_EPOCH) {
                                     Ok(x) => x,
-                                    Err(_) => break
-                                }.as_millis(),
+                                    Err(_) => break,
+                                }
+                                .as_millis(),
                             };
                             if let Ok(x) = serde_json::to_string(&data) {
                                 logs_chan.send(x);

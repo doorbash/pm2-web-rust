@@ -6,14 +6,14 @@ use actix_web::{
     Result,
 };
 use askama::Template;
+use clap::Parser;
 use std::{
     collections::{HashMap, VecDeque},
     process,
     time::Duration,
 };
-use tokio::sync::mpsc::{Sender, channel, unbounded_channel};
+use tokio::sync::mpsc::{channel, unbounded_channel, Sender};
 use uuid::Uuid;
-use clap::Parser;
 
 /// A simple web based monitor for PM2
 #[derive(Parser)]
@@ -49,7 +49,9 @@ async fn js_handler(_: HttpRequest) -> Result<HttpResponse> {
         time_enabled: true,
         app_id_enabled: false,
         app_name_enabled: true,
-    }.render()) {
+    }
+    .render())
+    {
         Ok(x) => Ok(HttpResponse::Ok().content_type("text/javascript").body(x)),
         Err(_) => Err(ErrorInternalServerError("error in js_handler")),
     }
@@ -61,12 +63,14 @@ async fn logs_handler(req: HttpRequest, stream: web::Payload) -> Result<HttpResp
     let clients_ch_s = match req.app_data::<Sender<Client>>() {
         Some(x) => x,
         None => return Err(ErrorInternalServerError("err")),
-    }.clone();
+    }
+    .clone();
 
     let removed_clients_ch_s = match req.app_data::<Sender<Uuid>>() {
         Some(x) => x,
         None => return Err(ErrorInternalServerError("err")),
-    }.clone();
+    }
+    .clone();
 
     let (stats_ch_s, mut stats_ch_r) = channel::<String>(1);
     let (logs_ch_s, mut logs_ch_r) = channel::<String>(200);
@@ -202,15 +206,20 @@ async fn main() -> Result<(), std::io::Error> {
             .route("/script.js", web::get().to(js_handler))
             .service(web::resource("/logs").route(web::get().to(logs_handler)))
             .service(Files::new("/", "./static/").index_file("index.html"))
-    }).workers(4).bind(("0.0.0.0", 6060));
+    })
+    .workers(4)
+    .bind(("0.0.0.0", 6060));
 
-    let j4 = tokio::task::spawn(match result {
-        Ok(x) => x,
-        Err(err) => {
-            println!("{}", err);
-            process::exit(1);
+    let j4 = tokio::task::spawn(
+        match result {
+            Ok(x) => x,
+            Err(err) => {
+                println!("{}", err);
+                process::exit(1);
+            }
         }
-    }.run());
+        .run(),
+    );
 
     if tokio::try_join!(j1, j2, j3, j4).is_err() {
         process::exit(1);
