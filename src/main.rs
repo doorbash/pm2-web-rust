@@ -97,7 +97,7 @@ async fn logs_handler(req: HttpRequest, stream: web::Payload) -> Result<HttpResp
                             let _ = session.close(None).await;
                             break;
                         }
-                    }
+                    } else { break; }
                 },
                 message = logs_ch_r.recv() => {
                     if let Some(x) = message {
@@ -106,7 +106,7 @@ async fn logs_handler(req: HttpRequest, stream: web::Payload) -> Result<HttpResp
                             let _ = session.close(None).await;
                             break;
                         }
-                    }
+                    } else { break; }
                 }
             }
         }
@@ -140,59 +140,53 @@ async fn main() -> Result<(), std::io::Error> {
         loop {
             tokio::select! {
                 data = stats_ch_r.recv() => {
-                    if let Some(x) = data {
-                        stats = x;
-                        for client in clients.values() {
-                            tokio::select! {
-                                _ = client.stats_ch.send(stats.clone()) => {},
-                                else => ()
-                            }
+                    stats = data.expect("stats channel is closed");
+                    for client in clients.values() {
+                        tokio::select! {
+                            _ = client.stats_ch.send(stats.clone()) => {},
+                            else => ()
                         }
                     }
                 },
                 data = logs_ch_r.recv() => {
+                    let data = data.expect("logs channel is closed");
                     while logs.len() >= args.log_buffer_size {
                         logs.pop_front();
                     }
-                    if let Some(data) = data {
-                        let data_clone = data.clone();
-                        logs.push_back(data);
-                        for client in clients.values() {
-                            tokio::select! {
-                                _ = client.logs_ch.send(data_clone.clone()) => (),
-                                else => ()
-                            }
+                    logs.push_back(data.clone());
+                    for client in clients.values() {
+                        tokio::select! {
+                            _ = client.logs_ch.send(data.clone()) => (),
+                            else => ()
                         }
                     }
                 }
                 client = clients_ch_r.recv() => {
-                    if let Some(client) = client {
-                        println!("client connected: {}", client.uuid);
+                    let client = client.expect("clients channel is closed");
+                    println!("client connected: {}", client.uuid);
 
-                        if !stats.is_empty() {
-                            tokio::select! {
-                                _ = client.stats_ch.send(stats.clone()) => (),
-                                else => ()
-                            }
+                    if !stats.is_empty() {
+                        tokio::select! {
+                            _ = client.stats_ch.send(stats.clone()) => (),
+                            else => ()
                         }
-
-                        for log in logs.iter().cloned() {
-                            tokio::select! {
-                                _ = client.logs_ch.send(log) => (),
-                                else => ()
-                            }
-                        }
-
-                        clients.insert(client.uuid, client);
-                        println!("num connected clients: {}", clients.len());
                     }
+
+                    for log in logs.iter().cloned() {
+                        tokio::select! {
+                            _ = client.logs_ch.send(log) => (),
+                            else => ()
+                        }
+                    }
+
+                    clients.insert(client.uuid, client);
+                    println!("num connected clients: {}", clients.len());
                 }
                 uuid = removed_clients_ch_r.recv() => {
-                    if let Some(uuid) = uuid {
-                        println!("client disconnected: {}", uuid);
-                        clients.remove(&uuid);
-                        println!("num connected clients: {}", clients.len());
-                    }
+                    let uuid = uuid.expect("removed clients channel is closed");
+                    println!("client disconnected: {}", uuid);
+                    clients.remove(&uuid);
+                    println!("num connected clients: {}", clients.len());
                 },
             }
         }
