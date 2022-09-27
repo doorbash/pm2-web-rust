@@ -93,8 +93,8 @@ async fn logs_handler(req: HttpRequest, stream: web::Payload) -> Result<HttpResp
                 message = stats_ch_r.recv() => {
                     if let Some(x) = message {
                         if session.text(x).await.is_err() {
-                            removed_clients_ch_s.send(uuid).await;
-                            session.close(None).await;
+                            let _ = removed_clients_ch_s.send(uuid).await;
+                            let _ = session.close(None).await;
                             break;
                         }
                     }
@@ -102,8 +102,8 @@ async fn logs_handler(req: HttpRequest, stream: web::Payload) -> Result<HttpResp
                 message = logs_ch_r.recv() => {
                     if let Some(x) = message {
                         if session.text(x).await.is_err() {
-                            removed_clients_ch_s.send(uuid).await;
-                            session.close(None).await;
+                            let _ = removed_clients_ch_s.send(uuid).await;
+                            let _ = session.close(None).await;
                             break;
                         }
                     }

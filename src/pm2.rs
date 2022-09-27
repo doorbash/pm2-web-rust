@@ -153,15 +153,17 @@ impl PM2 {
                 }
             }),
             tokio::task::spawn(async move {
-                if let Ok(child) = Command::new("pm2")
-                    .arg("logs")
-                    .arg("--format")
-                    .arg("--timestamp")
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::null())
-                    .spawn()
-                {
-                    if let Some(stdout) = child.stdout {
+                loop {
+                    let mut child = Command::new("pm2")
+                        .arg("logs")
+                        .arg("--format")
+                        .arg("--timestamp")
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::null())
+                        .spawn()
+                        .expect("pm2 not found");
+
+                    if let Some(stdout) = child.stdout.take() {
                         let mut br = BufReader::new(stdout);
                         let mut line = String::new();
                         loop {
@@ -170,47 +172,51 @@ impl PM2 {
                                 break;
                             }
 
-                            if None == line.find("timestamp=") {
+                            if line.is_empty() {
                                 break;
+                            }
+
+                            if None == line.find("timestamp=") {
+                                continue;
                             }
 
                             let idx1 = match line.find(' ') {
                                 Some(x) => x,
-                                None => break,
+                                None => continue,
                             };
 
                             if !line[idx1 + 1..].starts_with("app=") {
-                                break;
+                                continue;
                             }
 
                             let idx2 =
                                 idx1 + match line[idx1 + 1..].find(' ') {
                                     Some(x) => x,
-                                    None => break,
+                                    None => continue,
                                 } + 1;
 
                             if !line[idx2 + 1..].starts_with("id=") {
-                                break;
+                                continue;
                             }
 
                             let idx3 =
                                 idx2 + match line[idx2 + 1..].find(' ') {
                                     Some(x) => x,
-                                    None => break,
+                                    None => continue,
                                 } + 1;
 
                             if !line[idx3 + 1..].starts_with("type=") {
-                                break;
+                                continue;
                             }
 
                             let idx4 =
                                 idx3 + match line[idx3 + 1..].find(' ') {
                                     Some(x) => x,
-                                    None => break,
+                                    None => continue,
                                 } + 1;
 
                             if !line[idx4 + 1..].starts_with("message=") {
-                                break;
+                                continue;
                             }
 
                             let data = Message {
@@ -224,16 +230,18 @@ impl PM2 {
                                 },
                                 time: match SystemTime::now().duration_since(UNIX_EPOCH) {
                                     Ok(x) => x,
-                                    Err(_) => break,
+                                    Err(_) => continue,
                                 }
                                 .as_millis(),
                             };
                             if let Ok(x) = serde_json::to_string(&data) {
-                                logs_chan.send(x);
+                                let _ = logs_chan.send(x);
                             }
                             line.clear();
                         }
                     }
+
+                    let _ = child.kill().await;
                 }
             }),
         );
